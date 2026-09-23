@@ -1,0 +1,3 @@
+# Copy to config.yaml and set paths for your own Vault if defaults do not fit.
+# Do not commit config.yaml or business data.
+{}

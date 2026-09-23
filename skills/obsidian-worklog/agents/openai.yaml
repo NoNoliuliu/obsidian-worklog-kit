@@ -1,0 +1,3 @@
+interface:
+  display_name: "Obsidian Worklog"
+  short_description: "查询项目背景、归档进展、复用经验并生成周报"
