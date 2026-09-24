@@ -2,7 +2,7 @@
 name: obsidian-worklog
 description: 使用 Obsidian 工作记录后端查询项目背景、归档已确认的进展和任务、复用经验，并预览或导出周报。使用仓库附带后端并配置个人 Vault 后运行。
 metadata:
-  version: "1.30.0-share"
+  version: "1.30.1-share"
 ---
 
 # Obsidian 工作记录
@@ -15,7 +15,7 @@ Obsidian Vault 是工作事实来源。通过统一命令查询和写入，不�
 python3 "/你的/Skill目录/obsidian-worklog/scripts/record_worklog.py" <命令>
 ```
 
-仓库包含脱敏后端，不含业务数据。Skill 以符号链接安装时会定位同仓库的后端；若复制 Skill 到别处，需设置 `WORKLOG_ROOT` 为后端绝对路径。先读 [部署与验收](references/setup.md)，具体使用顺序见 [操作流程](references/workflow.md)。命令及参数以已安装后端的帮助输出为准。
+仓库包含脱敏后端，不含业务数据。Skill 以符号链接安装时会定位同仓库的后端；若复制 Skill 到别处，需设置 `WORKLOG_ROOT` 为后端绝对路径。先读 [部署与验收](references/setup.md)，具体使用顺序见 [操作流程](references/workflow.md)。遇到覆盖写权限提示时按 [权限弹窗排查](references/setup.md#覆盖写权限弹窗) 处理。命令及参数以已安装后端的帮助输出为准。
 
 ## 常见请求
 
