@@ -58,6 +58,7 @@ VALID_ISSUE_STATUSES = {"待分析", "处理中", "已解决", "已接受", "待
 VALID_METHOD_STATUSES = {"候选", "正式", "已归档"}
 NODE_INDEX_VERSION = 1
 _TIMING_STORE = ContextVar("worklog_timing_store", default=None)
+_INTENT_WRITE_STORE = ContextVar("worklog_intent_write_store", default=None)
 
 
 def _classify_project(name: str, major_work: str, overview_path: str = "") -> dict[str, Any]:
@@ -111,6 +112,10 @@ def _atomic_write(path: Path, content: str) -> None:
     store = _TIMING_STORE.get()
     with store.timed_stage("_atomic_write") if store is not None else nullcontext():
         path.parent.mkdir(parents=True, exist_ok=True)
+        intent_store = _INTENT_WRITE_STORE.get()
+        if intent_store is not None and path.exists() and intent_store._is_managed_intent_path(path):
+            intent_store._write_existing_node_without_replace(path, content)
+            return
         temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
         temporary.write_text(content, encoding="utf-8", newline="\n")
         os.replace(temporary, path)
@@ -1173,8 +1178,50 @@ views:
         path = Path(node["path"])
         meta, body = _parse_frontmatter(path)
         meta.update(changes)
-        _atomic_write(path, f"---\n{_safe_yaml(meta)}\n---\n\n{body.lstrip()}")
+        content = f"---\n{_safe_yaml(meta)}\n---\n\n{body.lstrip()}"
+        self._write_existing_node_without_replace(path, content)
         self._refresh_node_cache_entry(path)
+
+    def _write_existing_node_without_replace(self, path: Path, content: str) -> None:
+        """Rewrite a node in place so sandbox monitors do not see a delete.
+
+        Keep a durable preimage because an in-place write is not atomic. The
+        caller holds the Vault mutation lock, so another worklog writer cannot
+        observe a partly written node through this backend.
+        """
+        original = path.read_bytes()
+        updated = content.encode("utf-8")
+        if original == updated:
+            return
+        path_key = hashlib.sha256(str(path).encode("utf-8")).hexdigest()[:16]
+        backup = self.backups_dir / "node-meta-rewrite" / f"{path_key}-{uuid.uuid4().hex}.bak"
+        backup.parent.mkdir(parents=True, exist_ok=True)
+        with backup.open("xb") as handle:
+            handle.write(original)
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            with path.open("r+b") as handle:
+                handle.seek(0)
+                handle.write(updated)
+                handle.truncate()
+                handle.flush()
+                os.fsync(handle.fileno())
+        except Exception:
+            with path.open("r+b") as handle:
+                handle.seek(0)
+                handle.write(original)
+                handle.truncate()
+                handle.flush()
+                os.fsync(handle.fileno())
+            raise
+
+    def _is_managed_intent_path(self, path: Path) -> bool:
+        """Limit non-replacing writes to regular files inside this Vault."""
+        resolved = path.resolve()
+        return (path.is_file() and not path.is_symlink()
+                and resolved.is_relative_to(self.vault_root.resolve())
+                and not resolved.is_relative_to(self.backups_dir.resolve()))
 
     def _latest_lane_node(self, project_id: str, lane_id: str) -> dict[str, Any] | None:
         return next(
@@ -2587,7 +2634,11 @@ views:
     @_timed_method
     def record_intent(self, payload: dict[str, Any]) -> dict[str, Any]:
         with self.mutation_lock():
-            return self._record_intent(payload)
+            token = _INTENT_WRITE_STORE.set(self)
+            try:
+                return self._record_intent(payload)
+            finally:
+                _INTENT_WRITE_STORE.reset(token)
 
     def _record_intent(self, payload: dict[str, Any]) -> dict[str, Any]:
         intent_type = str(payload.get("intent_type") or "").strip()

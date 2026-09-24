@@ -2,7 +2,7 @@
 name: obsidian-worklog
 description: 使用 Obsidian 工作记录后端查询项目背景、归档已确认的进展和任务、复用经验，并预览或导出周报。使用仓库附带后端并配置个人 Vault 后运行。
 metadata:
-  version: "1.30.1-share"
+  version: "1.30.2-share"
 ---
 
 # Obsidian 工作记录
