@@ -16,6 +16,19 @@ from report_content import leader_text, PRIVATE_TEXT, apply_review, fingerprint
 
 
 WEEKLY_EXCLUDED_PROJECT_IDS = set()
+
+
+# 仅在 config.yaml 未配置 weekly_excluded_project_ids 时使用的默认名单。
+def weekly_excluded_project_ids() -> set[str]:
+    from settings import load_settings
+    configured = load_settings().get("weekly_excluded_project_ids")
+    if configured is None:
+        return set(WEEKLY_EXCLUDED_PROJECT_IDS)
+    if not isinstance(configured, list):
+        raise WorklogError("config.yaml 的 weekly_excluded_project_ids 必须是项目ID列表")
+    return {str(item) for item in configured}
+
+
 WEEKLY_MAJOR_ORDER = {"项目推进": 0, "培训工作": 1, "其他": 2}
 WEEKLY_KEY_POINTS = {
     "项目推进": "项目推进",
@@ -63,11 +76,12 @@ def prepare_weekly_report_items(
 ) -> list[dict[str, Any]]:
     """Apply weekly presentation rules without changing Obsidian history."""
     projects = {item["project_id"]: item for item in store.list_projects()}
+    excluded = weekly_excluded_project_ids()
     prepared: list[dict[str, Any]] = []
     for item in items:
         project_id = str(item.get("project_id") or "")
         project = projects.get(project_id, {})
-        if project_id in WEEKLY_EXCLUDED_PROJECT_IDS:
+        if project_id in excluded:
             continue
         if project.get("display_in_views", True) is False:
             continue

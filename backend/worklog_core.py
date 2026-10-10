@@ -43,7 +43,19 @@ VALID_PROJECT_STATUSES = {"进行中", "已完成", "暂停", "待确认"}
 VALID_TRACK_TYPES = {"主线", "支线", "子任务"}
 VALID_RELATION_TYPES = {"顺序", "分叉", "子任务", "汇合"}
 VALID_KINDS = {"进展", "产出", "反馈", "状态变化", "计划"}
-VALID_SOURCES = {"WorkBuddy", "Claude Code", "Codex", "QoderWork", "手工记录", "历史Excel", "Obsidian历史"}
+VALID_SOURCES = {"WorkBuddy", "Claude Code", "Codex", "Doubao Work", "Qwen Office", "QoderWork",
+                 "手工记录", "历史Excel", "Obsidian历史"}
+SOURCE_ALIASES = {"Doubao": "Doubao Work", "豆包": "Doubao Work", "Qwen": "Qwen Office",
+                  "千问办公": "Qwen Office", "Claude": "Claude Code"}
+
+
+def normalize_source(value: Any) -> str:
+    """Canonical AI tool name for new records; unknown names are rejected, not stored loosely."""
+    raw = str(value or "").strip() or "手工记录"
+    source = SOURCE_ALIASES.get(raw, raw)
+    if source not in VALID_SOURCES:
+        raise WorklogError(f"source 必须是：{'、'.join(sorted(VALID_SOURCES))}（收到：{raw}）")
+    return source
 VALID_WORK_TYPES = {"项目", "持续工作", "单次事项"}
 VALID_PROJECT_MODES = {"bounded", "ongoing"}
 VALID_INTENT_TYPES = {"更新任务", "新任务", "支线", "成果", "状态变化", "单次事项"}
@@ -1401,7 +1413,7 @@ views:
                 "time_precision": time_precision,
                 "kind": kind,
                 "status": status,
-                "source": source if source in VALID_SOURCES else source,
+                "source": source,
                 "include_in_report": bool(include_in_report),
                 "supersedes": supersedes,
                 "revision": revision,
@@ -2696,7 +2708,7 @@ views:
                 parent_task_id=str(payload.get("parent_task_id") or ""),
                 predecessor_task_ids=payload.get("predecessor_task_ids") or [],
                 related_path=str(payload.get("related_path") or ""),
-                source=str(payload.get("source") or "手工记录"),
+                source=normalize_source(payload.get("source")),
             )
         if not task:
             open_tasks = self.list_tasks(project["project_id"], {"待开始", "进行中", "等待中", "阻塞", "待确认"})
@@ -2717,7 +2729,7 @@ views:
             status=node_status,
             next_action=str(payload.get("next_action") or ""),
             kind=kind,
-            source=str(payload.get("source") or "手工记录"),
+            source=normalize_source(payload.get("source")),
             occurred_at=payload.get("occurred_at"),
             related_path=str(payload.get("related_path") or ""),
             include_in_report=_as_bool(payload.get("include_in_report", True)),

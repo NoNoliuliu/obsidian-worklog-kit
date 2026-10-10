@@ -1,3 +1,6 @@
 # Copy to config.yaml and set paths for your own Vault if defaults do not fit.
 # Do not commit config.yaml or business data.
 {}
+# 可选：周报固定排除的项目ID列表（记录仍保留在 Vault）。
+# weekly_excluded_project_ids:
+#   - prj-xxxxxxxxxx
