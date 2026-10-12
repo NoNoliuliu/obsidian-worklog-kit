@@ -144,9 +144,9 @@ def build_report_preview(
             continue
         entry = plan_map.setdefault(item["project_id"], {
             "project_id": item["project_id"],
-            "project_name": item.get("project_name", "未命名项目"),
-            "major_work": item.get("major_work", "其他"),
-            "key_point": item.get("key_point", "其他支持事项"),
+            "project_name": projects.get(item["project_id"], {}).get("name", item.get("project_name", "未命名项目")),
+            "major_work": projects.get(item["project_id"], {}).get("major_work", item.get("major_work", "其他")),
+            "key_point": projects.get(item["project_id"], {}).get("key_point", item.get("key_point", "其他支持事项")),
             "points": [],
             "source_action_ids": [],
         })

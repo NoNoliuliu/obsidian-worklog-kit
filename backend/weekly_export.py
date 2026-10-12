@@ -16,8 +16,6 @@ from report_content import leader_text, PRIVATE_TEXT, apply_review, fingerprint
 
 
 WEEKLY_EXCLUDED_PROJECT_IDS = set()
-
-
 # 仅在 config.yaml 未配置 weekly_excluded_project_ids 时使用的默认名单。
 def weekly_excluded_project_ids() -> set[str]:
     from settings import load_settings
@@ -159,6 +157,9 @@ def content_text(item: dict[str, Any]) -> str:
         f"{i}.{p}" for i, p in enumerate(item.get("points") or ["暂无记录"], 1))
 
 
+EXCEL_MAX_ROW_HEIGHT = 409
+
+
 def content_height(text: str) -> float:
     # CJK glyphs occupy about twice the width of Latin glyphs. Leave wrapping margin.
     lines = sum(max(1, math.ceil(sum(2 if unicodedata.east_asian_width(c) in "WF" else 1 for c in line) / 105)) for line in text.splitlines())
@@ -192,7 +193,7 @@ def _write_section(
         project_name = str(item.get("project_name") or "未命名项目")
         text = content_text(item)
         height = content_height(text)
-        if height > 409:
+        if height > EXCEL_MAX_ROW_HEIGHT:
             raise WorklogError(f"{project_name}正文超过单行可展示长度，请按独立事项精简后导出")
         worksheet.write_rich_string(
             row,
@@ -300,7 +301,7 @@ def _export_weekly_report(
     prepared_plan = prepare_weekly_report_items(store, fresh["plan_items"])
     # Validate text/size before creating any file.
     for item in prepared_current + prepared_plan:
-        if PRIVATE_TEXT.search(content_text(item)) or content_height(content_text(item)) > 409:
+        if PRIVATE_TEXT.search(content_text(item)) or content_height(content_text(item)) > EXCEL_MAX_ROW_HEIGHT:
             raise WorklogError("正文仍含内部信息或过长，请先整理后导出")
 
     output_dir = Path(export_dir).resolve()

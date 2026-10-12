@@ -4,3 +4,11 @@
 # 可选：周报固定排除的项目ID列表（记录仍保留在 Vault）。
 # weekly_excluded_project_ids:
 #   - prj-xxxxxxxxxx
+# 可选：search 默认跳过的 Vault 相对目录（--scope all 时忽略）。
+# search_exclude:
+#   - 个人/
+# 可选：search --scope personal 查询的目录。
+# personal_prefixes:
+#   - 个人/
+# 可选：dashboard 导出目录（必须在 Vault 之外）。
+# dashboard_dir: /path/outside/vault/dashboard

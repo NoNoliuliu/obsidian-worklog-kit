@@ -10,6 +10,9 @@
 - **工作归档**：按已确认的事实记录进展、成果与状态变化；更正保留修订链。
 - **经验复用**：检索问题和方法，核对适用条件，记录验证结果。
 - **周报**：按日期预览完整来源，人工核对内容后导出 Excel。
+- **写前预检**：疑似重复、占位、未确认内容等先返回需确认，不直接写入；误写可 `undo`。
+- **收件箱**：未确认的想法先 `capture`，确认后再分流为工作记录、方法候选或个人笔记。
+- **看板与复盘**：导出 JSON/静态 HTML 看板；按工作线生成只读复盘草稿。
 - **维护**：只读审计结构与关联；修复、归并和目录调整按受控流程执行。
 
 ## 运行要求
@@ -41,9 +44,9 @@ mkdir -p backend/vault/周报系统/{项目台账,任务台账,工作节点}
 从仓库根目录运行：
 
 ```bash
-python3 skills/obsidian-worklog/scripts/record_worklog.py projects --compact --pretty --visible-only --sort-by last_activity
+python3 skills/obsidian-worklog/scripts/record_worklog.py brief --pretty
 python3 skills/obsidian-worklog/scripts/record_worklog.py context --project "项目名"
-python3 skills/obsidian-worklog/scripts/record_worklog.py preview --start 2026-09-21 --end 2026-09-25
+python3 skills/obsidian-worklog/scripts/record_worklog.py preview --start 2026-09-21 --end 2026-09-25 --draft-review
 python3 skills/obsidian-worklog/scripts/record_worklog.py audit-integrity
 ```
 

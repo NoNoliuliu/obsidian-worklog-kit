@@ -10,6 +10,8 @@ from typing import Any
 
 from settings import load_settings
 from worklog_core import WorklogError, WorklogStore
+from worklog_guard import SCHEMAS, classify_intent, plan_intent, unacknowledged
+from worklog_inbox import PENDING, TRIAGE_STATUS, capture, inbox_counts, list_inbox, triage
 from worklog_structure import WORK_DOMAINS
 
 
@@ -39,8 +41,22 @@ CONTEXT_NODE_FIELDS = (
 )
 
 READ_ONLY_COMMANDS = {
-    "projects", "context", "tasks", "search", "list-candidates", "method", "graph", "preview", "audit-integrity",
+    "projects", "brief", "context", "tasks", "search", "list-candidates", "method", "graph", "preview", "audit-integrity",
     "audit-project-materials", "audit-structure", "node", "move-project", "rename-project", "recover-project-maintenance",
+    "schema", "inbox", "dashboard", "retro",
+}
+NEEDS_CONFIRMATION_EXIT = 3
+UNDO_WINDOW = timedelta(hours=24)
+
+PROJECT_SUMMARY_CHARS = 80
+CONTEXT_MAX_CHARS = 12000
+FULL_CONTEXT_MAX_CHARS = 18000
+OPEN_TASK_STATUSES = {"待开始", "进行中", "等待中", "阻塞", "待确认"}
+# 会批量改状态的旧命令直接停用，在初始化存储前拒绝。
+RETIRED_COMMANDS = {
+    "complete-project": "已停用：会批量关闭全部未完成任务。结项请用 close-project（有遗留任务时显式加 --allow-open）。",
+    "close-superseded-tasks": "已停用：请逐个 task-update 并说明依据。",
+    "close-superseded-nodes": "已停用：节点更正请用 revise-node-json，误归档请用 exclude-node-json。",
 }
 
 _TIMING_CONTEXT: dict[str, Any] | None = None
@@ -73,6 +89,8 @@ def emit(payload, code: int = 0, *, compact: bool = False) -> int:
 
 
 def command_is_read_only(args: argparse.Namespace) -> bool:
+    if args.command in {"record-intent-json", "undo"}:
+        return bool(args.dry_run)
     return args.command in READ_ONLY_COMMANDS and not (
         args.command == "audit-project-materials" and args.write_report
     ) and not (
@@ -115,11 +133,18 @@ def _project_activity_value(project: dict[str, Any]) -> str:
     return ""
 
 
+def _clip(value: Any, limit: int) -> Any:
+    text = str(value or "")
+    if limit <= 0 or len(text) <= limit:
+        return value
+    return text[:limit].rstrip() + "…"
+
+
 def select_projects(
     projects: list[dict[str, Any]], *, statuses: list[str] | None = None,
     since_days: int | None = None, visible_only: bool = False,
     sort_by: str = "", limit: int | None = None, compact: bool = False,
-    today: date | None = None,
+    today: date | None = None, summary_chars: int = 0,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Filter project output while retaining counts that expose intentional truncation."""
     statuses = statuses or []
@@ -146,6 +171,10 @@ def select_projects(
         selected = selected[:limit]
     if compact:
         selected = [{key: item.get(key) for key in PROJECT_COMPACT_FIELDS} for item in selected]
+        if summary_chars > 0:
+            for item in selected:
+                item["latest_summary"] = _clip(item.get("latest_summary"), summary_chars)
+                item["next_action"] = _clip(item.get("next_action"), summary_chars)
 
     meta = {
         "total": len(projects),
@@ -160,6 +189,8 @@ def select_projects(
         "sort_by": sort_by or "source",
         "compact": compact,
     }
+    if compact and summary_chars > 0:
+        meta["summary_chars"] = summary_chars
     return selected, meta
 
 
@@ -167,8 +198,15 @@ def compact_project_context(context: dict[str, Any], summary_chars: int = 500) -
     """Return enough stable identifiers for AI continuation without large page bodies."""
     def select(item: dict[str, Any], fields: tuple[str, ...]) -> dict[str, Any]:
         result = {key: item.get(key) for key in fields}
-        if "summary" in result and len(str(result["summary"] or "")) > summary_chars:
-            result["summary"] = str(result["summary"])[:summary_chars].rstrip() + "…"
+        if "summary" in result:
+            result["summary"] = _clip(result["summary"], summary_chars)
+        return result
+
+    def lane(item: dict[str, Any]) -> dict[str, Any]:
+        node_ids = list(item.get("nodes") or [])
+        result = {key: value for key, value in item.items() if key != "nodes"}
+        result["node_count"] = len(node_ids)
+        result["latest_node_id"] = node_ids[-1] if node_ids else ""
         return result
 
     open_tasks = context.get("open_tasks", [])
@@ -180,7 +218,7 @@ def compact_project_context(context: dict[str, Any], summary_chars: int = 500) -
         "project": select(context.get("project", {}), CONTEXT_PROJECT_FIELDS),
         "open_tasks": [select(item, CONTEXT_TASK_FIELDS) for item in open_tasks],
         "recent_nodes": [select(item, CONTEXT_NODE_FIELDS) for item in recent_nodes],
-        "work_lines": context.get("work_lines", []),
+        "work_lines": [lane(item) for item in context.get("work_lines", [])],
         "review_count": context.get("review_count", 0),
         "meta": {
             "completed_task_count": len(completed_tasks),
@@ -192,6 +230,98 @@ def compact_project_context(context: dict[str, Any], summary_chars: int = 500) -
     }
 
 
+def _json_size(payload: Any) -> int:
+    return len(json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str))
+
+
+def fit_compact_context(context: dict[str, Any], max_chars: int) -> dict[str, Any]:
+    """Shrink a compact context until its JSON fits ``max_chars``; the project and open tasks are always kept."""
+    result = json.loads(json.dumps(context, ensure_ascii=False, default=str))
+    meta = result.setdefault("meta", {})
+    meta["max_chars"] = max_chars
+    if max_chars <= 0 or _json_size(result) <= max_chars:
+        meta["truncated"] = False
+        return result
+    steps: list[str] = []
+    # Reserve room for the truncation metadata appended below.
+    budget = max(max_chars - 300, max_chars // 2)
+
+    def over() -> bool:
+        return _json_size(result) > budget
+
+    for limit in (240, 120):
+        for node in result.get("recent_nodes", []):
+            node["summary"] = _clip(node.get("summary"), limit)
+            node["next_action"] = _clip(node.get("next_action"), limit)
+        steps.append(f"recent_nodes.summary<={limit}")
+        if not over():
+            break
+    dropped = 0
+    while over() and len(result.get("recent_nodes", [])) > 3:
+        result["recent_nodes"].pop()
+        dropped += 1
+    if dropped:
+        steps.append(f"recent_nodes-{dropped}")
+    if over():
+        for task in result.get("open_tasks", []):
+            task["next_action"] = _clip(task.get("next_action"), 120)
+        steps.append("open_tasks.next_action<=120")
+    if over() and len(result.get("work_lines", [])) > 5:
+        meta["work_line_count"] = len(result["work_lines"])
+        result["work_lines"] = result["work_lines"][:5]
+        steps.append("work_lines<=5")
+    meta["truncated"] = True
+    meta["truncation_steps"] = steps
+    meta["omitted_recent_nodes"] = dropped
+    meta["over_budget"] = _json_size(result) > max_chars
+    return result
+
+
+def build_brief(
+    projects: list[dict[str, Any]], tasks: list[dict[str, Any]], *, since_days: int = 7,
+    today: date | None = None, summary_chars: int = 80, review_count: int = 0, inbox_pending: int = 0,
+) -> dict[str, Any]:
+    """Smallest useful overview: recently active visible projects plus waiting or blocked tasks."""
+    visible = [item for item in projects if item.get("display_in_views", True)]
+    recent, recent_meta = select_projects(
+        visible, since_days=since_days, sort_by="last_activity", compact=True,
+        today=today, summary_chars=summary_chars,
+    )
+    active = [item for item in visible if item.get("project_status") in {"进行中", "待确认"}]
+    recent_names = {item["name"] for item in recent}
+    other_active = sorted(
+        (item for item in active if item.get("name") not in recent_names),
+        key=_project_activity_value, reverse=True,
+    )
+    visible_names = {item.get("project_id"): item.get("name") for item in visible}
+    waiting = [
+        {"project": visible_names[task.get("project_id")], "task_id": task.get("task_id"),
+         "title": task.get("title"), "status": task.get("status")}
+        for task in tasks
+        if task.get("status") in {"等待中", "阻塞", "待确认"} and task.get("project_id") in visible_names
+    ]
+    return {
+        "since_days": since_days,
+        "recent_projects": [
+            {key: item.get(key) for key in ("name", "project_status", "last_activity_at", "latest_summary", "next_action", "open_task_count")}
+            for item in recent
+        ],
+        "other_active_projects": [
+            {"name": item.get("name"), "project_status": item.get("project_status"), "last_activity_at": item.get("last_activity_at")}
+            for item in other_active
+        ],
+        "waiting_or_blocked_tasks": waiting,
+        "counts": {
+            "visible_projects": len(visible),
+            "active_projects": len(active),
+            "recent_projects": recent_meta["matched"],
+            "open_tasks": sum(1 for task in tasks if task.get("status") in OPEN_TASK_STATUSES and task.get("project_id") in visible_names),
+            "pending_review_nodes": review_count,
+            "inbox_pending": inbox_pending,
+        },
+    }
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Obsidian 周报系统统一记录命令")
     # 历史维护与旧入口仍可调用，但不出现在 --help；日常命令见 Skill 文档。
@@ -199,16 +329,25 @@ def build_parser() -> argparse.ArgumentParser:
     projects = sub.add_parser("projects", help="列出项目台账")
     projects.add_argument("--status", action="append", default=[], help="按项目状态筛选，可重复")
     projects.add_argument("--since-days", type=_positive_int, help="只返回最近 N 天有活动的项目")
-    projects.add_argument("--visible-only", action="store_true", help="只返回进入工作视图的项目")
+    projects.add_argument("--visible-only", action="store_true", help="兼容选项：默认已只返回进入工作视图的项目")
+    projects.add_argument("--include-hidden", action="store_true", help="同时返回不进入工作视图的项目")
+    projects.add_argument("--summary-chars", type=int, default=PROJECT_SUMMARY_CHARS,
+                          help=f"--compact 时摘要与下一步的截断长度，默认 {PROJECT_SUMMARY_CHARS}；0 表示不截断")
     projects.add_argument("--sort-by", choices=("name", "last_activity"), default="")
     projects.add_argument("--limit", type=_positive_int, help="限制返回数量；meta.truncated 会标明是否省略")
     projects.add_argument("--compact", action="store_true", help="只返回日常查阅字段并压缩 JSON")
     projects.add_argument("--pretty", action="store_true", help="多行格式化 JSON；可与 --compact 同时使用")
-    context = sub.add_parser("context", help="读取项目总览、任务、最近进展和工作线")
+    brief = sub.add_parser("brief", help="最小工作概览：近期项目、其他进行中项目、等待/阻塞任务")
+    brief.add_argument("--since-days", type=_positive_int, default=7)
+    brief.add_argument("--summary-chars", type=int, default=80)
+    brief.add_argument("--pretty", action="store_true", help="多行格式化 JSON")
+    context = sub.add_parser("context", help="读取项目任务、最近进展和工作线（默认精简）")
     context.add_argument("--project", required=True)
     context.add_argument("--recent", type=int, default=12)
-    context.add_argument("--max-chars", type=int, default=18000)
-    context.add_argument("--compact", action="store_true", help="省略页面正文和已完成任务详情")
+    context.add_argument("--max-chars", type=int, default=None,
+                         help=f"精简输出的总字符上限（默认 {CONTEXT_MAX_CHARS}）；--full 时只限制总览正文（默认 {FULL_CONTEXT_MAX_CHARS}）")
+    context.add_argument("--full", action="store_true", help="返回总览正文、完整任务、问题与方法列表（体积大）")
+    context.add_argument("--compact", action="store_true", help="兼容选项：默认已是精简输出")
     context.add_argument("--pretty", action="store_true", help="多行格式化 JSON；可与 --compact 同时使用")
     tasks = sub.add_parser("tasks", help="查询任务台账")
     tasks.add_argument("--project", default="")
@@ -216,7 +355,9 @@ def build_parser() -> argparse.ArgumentParser:
     search = sub.add_parser("search", help="搜索项目、任务、进展和成果")
     search.add_argument("--query", required=True)
     search.add_argument("--limit", type=int, default=20)
-    search.add_argument("--business-only", action="store_true", help="只返回项目、任务、进展和问题，排除普通页面与方法资产")
+    search.add_argument("--business-only", action="store_true", help="只返回项目、任务、进展和问题，不扫描普通页面")
+    search.add_argument("--scope", choices=("default", "all", "personal"), default="default",
+                        help="default 跳过 config.yaml 的 search_exclude 目录；all 扫描全部普通页面；personal 只查个人笔记")
     graph = sub.add_parser("graph", help="读取项目主线、支线和节点关系")
     graph.add_argument("--project", required=True)
     node = sub.add_parser("node", help="只读取得指定节点及当前文件哈希，用于受控修订")
@@ -269,7 +410,38 @@ def build_parser() -> argparse.ArgumentParser:
     record.add_argument("--task-status", default="")
     record.add_argument("--intent-type", default="")
     sub.add_parser("record-json")
-    sub.add_parser("record-intent-json", help="从标准输入读取AI判断后的记录意图")
+    record_intent = sub.add_parser("record-intent-json", help="从标准输入读取AI判断后的记录意图；写前预检，命中需确认时不写入")
+    record_intent.add_argument("--dry-run", action="store_true", help="只做预检并给出将写入的项目、任务和节点，不写文件")
+    undo = sub.add_parser("undo", help="排除误归档节点（自动取哈希，保留审计历史）")
+    undo_target = undo.add_mutually_exclusive_group(required=True)
+    undo_target.add_argument("--node-id")
+    undo_target.add_argument("--last", action="store_true", help="最近 24 小时内最新录入的有效节点")
+    undo.add_argument("--source", default="", help="与 --last 合用：只看指定来源工具写入的节点")
+    undo.add_argument("--reason", required=True)
+    undo.add_argument("--dry-run", action="store_true", help="只显示将排除的节点，不写入")
+    capture_cmd = sub.add_parser("capture", help="随手记入收件箱（不进项目、全景和周报）；--personal 直接写个人笔记")
+    capture_cmd.add_argument("--text", default="", help="内容；省略时从标准输入读取")
+    capture_cmd.add_argument("--source", default="")
+    capture_cmd.add_argument("--project-hint", default="", help="可能相关的项目，仅供分流参考")
+    capture_cmd.add_argument("--tag", action="append", default=[])
+    capture_cmd.add_argument("--personal", action="store_true", help="写入 个人/随手记，只在 search --scope personal 中出现")
+    inbox_cmd = sub.add_parser("inbox", help="列出收件箱条目")
+    inbox_cmd.add_argument("--status", default=PENDING, help=f"默认 {PENDING}；all 表示全部")
+    triage_cmd = sub.add_parser("triage", help="分流收件箱条目：node/candidate 需从标准输入提供对应 JSON")
+    triage_cmd.add_argument("--inbox-id", required=True)
+    triage_cmd.add_argument("--to", choices=sorted(TRIAGE_STATUS), required=True)
+    triage_cmd.add_argument("--reason", default="")
+    dashboard_cmd = sub.add_parser("dashboard", help="导出看板 JSON 和静态 HTML（写到 Vault 之外）")
+    dashboard_cmd.add_argument("--output-dir", default="")
+    retro_cmd = sub.add_parser("retro", help="只读汇总一条工作线的证据，生成方法候选草稿")
+    retro_cmd.add_argument("--project", required=True)
+    retro_cmd.add_argument("--lane", default="")
+    retro_cmd.add_argument("--task-id", default="")
+    retro_cmd.add_argument("--since", default="", help="YYYY-MM-DD")
+    retro_cmd.add_argument("--limit", type=_positive_int, default=30, help="时间线只保留最近 N 条（默认 30）")
+    retro_cmd.add_argument("--summary-chars", type=_positive_int, default=120)
+    schema = sub.add_parser("schema", help="输出 *-json 命令的输入 JSON Schema 和最小样例")
+    schema.add_argument("--command", dest="target", choices=sorted(SCHEMAS), required=True)
     sub.add_parser("revise-node-json", help="从标准输入修订已有节点并保留历史关系")
     sub.add_parser("exclude-node-json", help="从标准输入排除误归档节点及其完整修订链")
     sub.add_parser("record-issue-json", help="从标准输入读取问题与决策记录")
@@ -358,6 +530,7 @@ def build_parser() -> argparse.ArgumentParser:
     preview.add_argument("--start")
     preview.add_argument("--end")
     preview.add_argument("--raw", action="store_true", help="返回完整候选事项及来源，不复用已核验整理稿")
+    preview.add_argument("--draft-review", action="store_true", help="输出已关联来源的整理稿草稿（不保存）；改写后用 save-review-json 或 export --review-file")
     export = sub.add_parser("export", help="生成并验证周报Excel")
     export.add_argument("--start")
     export.add_argument("--end")
@@ -377,9 +550,9 @@ def main(argv: list[str] | None = None) -> int:
     command_started = time.perf_counter()
     settings = load_settings()
     args = build_parser().parse_args(argv)
-    if args.command == "complete-project" and not args.confirm_all_open_tasks:
+    if args.command in RETIRED_COMMANDS:
         # Reject before store initialization or schema migration can write files.
-        print(json.dumps({"ok": False, "error": "complete-project 会批量关闭全部未完成任务。一般结项请使用 close-project；仅当用户明确确认全部遗留任务完成时，才可加 --confirm-all-open-tasks。"}, ensure_ascii=False))
+        print(json.dumps({"ok": False, "error": RETIRED_COMMANDS[args.command]}, ensure_ascii=False))
         return 2
     if args.command in {"move-project", "rename-project", "apply-project-maintenance", "recover-project-maintenance"}:
         # Maintenance owns its lock, snapshot and transaction. Never migrate or
@@ -424,24 +597,44 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "projects":
             projects, meta = select_projects(
                 store.list_projects(), statuses=args.status, since_days=args.since_days,
-                visible_only=args.visible_only, sort_by=args.sort_by, limit=args.limit,
-                compact=args.compact,
+                visible_only=not args.include_hidden, sort_by=args.sort_by, limit=args.limit,
+                compact=args.compact, summary_chars=args.summary_chars,
             )
             return emit({"ok": True, "meta": meta, "projects": projects}, compact=compact_json_output(args))
+        if args.command == "brief":
+            review_count = sum(1 for node in store.list_nodes() if node.get("review_state") == "待确认")
+            brief_result = build_brief(
+                store.list_projects(), store.list_tasks(), since_days=args.since_days,
+                summary_chars=args.summary_chars, review_count=review_count,
+                inbox_pending=inbox_counts(store).get(PENDING, 0),
+            )
+            return emit({"ok": True, "brief": brief_result}, compact=not args.pretty)
         if args.command == "context":
+            overview_limit = args.max_chars if args.full and args.max_chars else FULL_CONTEXT_MAX_CHARS
             with store.timed_stage("command_context"):
-                context_result = store.project_context(args.project, args.recent, args.max_chars)
-            if args.compact:
-                context_result = compact_project_context(context_result)
-            return emit({"ok": True, "context": context_result}, compact=compact_json_output(args))
+                context_result = store.project_context(args.project, args.recent, overview_limit)
+            if args.full:
+                return emit({"ok": True, "context": context_result}, compact=compact_json_output(args))
+            context_result = fit_compact_context(
+                compact_project_context(context_result),
+                CONTEXT_MAX_CHARS if args.max_chars is None else args.max_chars,
+            )
+            return emit({"ok": True, "context": context_result}, compact=not args.pretty)
         if args.command == "tasks":
             return emit({"ok": True, "tasks": store.tasks_with_current_progress(store.list_tasks(args.project, args.status))})
         if args.command == "search":
             search_limit = max(args.limit * 5, 100) if args.business_only else args.limit
-            results = store.search(args.query, search_limit)
+            exclude = [] if args.scope != "default" else list(settings.get("search_exclude", []))
+            if args.scope == "personal":
+                results = store.search(args.query, args.limit, include_entities=False,
+                                       only_prefixes=settings.get("personal_prefixes", ["个人/"]))
+            else:
+                results = store.search(args.query, search_limit, exclude_prefixes=exclude,
+                                       include_pages=not args.business_only)
             if args.business_only:
                 results = [item for item in results if item.get("kind") in {"project", "task", "node", "issue"}][:args.limit]
-            return emit({"ok": True, "results": results})
+            return emit({"ok": True, "meta": {"scope": args.scope, "excluded_prefixes": exclude,
+                                              "returned": len(results)}, "results": results})
         if args.command == "graph":
             project = store.get_project(args.project)
             if not project:
@@ -513,10 +706,86 @@ def main(argv: list[str] | None = None) -> int:
                 task_id=payload.get("task_id", ""), task_status=payload.get("task_status", ""), intent_type=payload.get("intent_type", ""),
             )
             return emit({"ok": True, "node": node})
+        if args.command == "capture":
+            text = args.text or sys.stdin.read()
+            item = capture(store, text, source=args.source, project_hint=args.project_hint,
+                           tags=args.tag, personal=args.personal)
+            return emit({"ok": True, "item": item})
+        if args.command == "inbox":
+            items = list_inbox(store, status="" if args.status == "all" else args.status)
+            return emit({"ok": True, "counts": inbox_counts(store), "items": items})
+        if args.command == "triage":
+            payload = json.load(sys.stdin) if args.to in {"node", "candidate"} else None
+            if args.to == "node":
+                project_ref = str(payload.get("project_id") or payload.get("project") or "").strip()
+                blocking = unacknowledged(classify_intent(
+                    payload, project=store.get_project(project_ref) if project_ref else None,
+                    nodes=store.list_nodes(effective_only=False), projects=store.list_projects(),
+                ), payload)
+                if blocking:
+                    return emit({"ok": False, "needs_confirmation": True, "findings": blocking,
+                                 "error": "预检未通过，未分流。用户确认后在 JSON 中加入 acknowledged_flags 重新提交。"},
+                                NEEDS_CONFIRMATION_EXIT)
+            return emit({"ok": True, **triage(store, args.inbox_id, args.to, reason=args.reason, payload=payload)})
+        if args.command == "dashboard":
+            from worklog_dashboard import export_dashboard
+            output_dir = args.output_dir or settings.get("dashboard_dir") or str(Path(__file__).resolve().parent / "runtime" / "dashboard")
+            return emit({"ok": True, **export_dashboard(store, output_dir)})
+        if args.command == "retro":
+            from worklog_retro import build_retro
+            return emit({"ok": True, "retro": build_retro(store, args.project, lane=args.lane, task_id=args.task_id, since=args.since,
+                                                          limit=args.limit, summary_chars=args.summary_chars)})
+        if args.command == "schema":
+            return emit({"ok": True, "command": args.target, **SCHEMAS[args.target]})
         if args.command == "record-intent-json":
+            payload = json.load(sys.stdin)
+            project_ref = str(payload.get("project_id") or payload.get("project") or "").strip()
+            findings = classify_intent(
+                payload, project=store.get_project(project_ref) if project_ref else None,
+                nodes=store.list_nodes(effective_only=False), projects=store.list_projects(),
+            )
+            blocking = unacknowledged(findings, payload)
+            if args.dry_run:
+                return emit({"ok": True, "dry_run": True, "plan": plan_intent(store, payload),
+                             "findings": findings, "needs_confirmation": bool(blocking)})
+            if blocking:
+                return emit({
+                    "ok": False, "needs_confirmation": True, "findings": blocking,
+                    "error": "预检未通过，未写入。向用户说明后，如确认仍要记录，在原 JSON 中加入 "
+                             "acknowledged_flags（列出确认放行的 code）重新提交。",
+                }, NEEDS_CONFIRMATION_EXIT)
             with store.timed_stage("command_record_intent"):
-                result = store.record_intent(json.load(sys.stdin))
-            return emit({"ok": True, "result": result})
+                result = store.record_intent(payload)
+            return emit({"ok": True, "result": result,
+                         **({"acknowledged_findings": findings} if findings else {})})
+        if args.command == "undo":
+            if args.node_id:
+                node = store.get_node(args.node_id)
+                if not node:
+                    raise WorklogError(f"节点不存在：{args.node_id}")
+            else:
+                cutoff = datetime.now() - UNDO_WINDOW
+                candidates = [
+                    item for item in store.list_nodes()
+                    if (not args.source or item.get("source") == args.source)
+                    and str(item.get("created_at") or "") >= cutoff.isoformat(timespec="seconds")
+                ]
+                if not candidates:
+                    raise WorklogError("最近 24 小时内没有可撤销的有效节点；请用 --node-id 指定")
+                latest = max(str(item.get("created_at") or "") for item in candidates)
+                tied = [item for item in candidates if str(item.get("created_at") or "") == latest]
+                if len(tied) > 1:
+                    choices = "；".join(f"{item['node_id']}（{str(item.get('summary') or '')[:30]}）" for item in tied)
+                    raise WorklogError(f"有 {len(tied)} 条节点录入时间相同（{latest}），无法确定最新一条；请用 --node-id 指定：{choices}")
+                node = tied[0]
+            if node.get("excluded"):
+                raise WorklogError(f"节点已被排除：{node['node_id']}")
+            summary = {key: node.get(key) for key in ("node_id", "project_name", "task_id", "occurred_at", "created_at", "source", "summary")}
+            if args.dry_run:
+                return emit({"ok": True, "dry_run": True, "node": summary})
+            with store.timed_stage("command_exclude_node"):
+                result = store.exclude_node(node["node_id"], node["hash"], args.reason)
+            return emit({"ok": True, "node": summary, "result": result})
         if args.command == "revise-node-json":
             payload = json.load(sys.stdin)
             node_id = str(payload.get("node_id") or "").strip()
@@ -593,13 +862,6 @@ def main(argv: list[str] | None = None) -> int:
             return emit({"ok": True, "task": store.merge_tasks(args.canonical_task, args.duplicate_task)})
         if args.command == "move-task":
             return emit({"ok": True, "task": store.move_task(args.task_id, args.target_project)})
-        if args.command == "complete-project":
-            return emit({"ok": True, "result": store.complete_project(args.project)})
-        if args.command == "close-superseded-tasks":
-            return emit({"ok": True, "result": store.close_superseded_tasks(dry_run=args.dry_run)})
-        if args.command == "close-superseded-nodes":
-            return emit({"ok": True, "result": store.close_superseded_nodes(
-                dry_run=args.dry_run, project=args.project, track_type=args.track_type)})
         if args.command == "add-task":
             task = store.create_task(
                 project=args.project, title=args.title, status=args.status,
@@ -633,6 +895,10 @@ def main(argv: list[str] | None = None) -> int:
             return emit({"ok": True, "migration": migration, "projects": len(store.list_projects()), "tasks": len(store.list_tasks())})
         if args.command == "preview":
             from reporting import build_report_preview
+            if args.draft_review:
+                from report_draft import build_review_draft
+                report = build_report_preview(store, args.start, args.end, use_review=False)
+                return emit({"ok": True, "draft": build_review_draft(report, store)})
             return emit({"ok": True, "report": build_report_preview(store, args.start, args.end, use_review=not args.raw)})
         if args.command == "export":
             from reporting import build_report_preview
