@@ -560,7 +560,7 @@ def main(argv: list[str] | None = None) -> int:
         from worklog_maintenance import plan_maintenance, apply_maintenance, recover_maintenance
         _TIMING_CONTEXT = None
         _COMMAND_STORE = None
-        maintenance_store = WorklogStore(settings["vault_root"], read_only=True)
+        maintenance_store = WorklogStore(settings["vault_root"], read_only=True, backups_dir=settings.get("backups_dir"))
         try:
             if args.command == "move-project":
                 result = plan_maintenance(maintenance_store, {"operation": "move", "project": args.project,
@@ -581,6 +581,7 @@ def main(argv: list[str] | None = None) -> int:
         settings["vault_root"], read_only=read_only,
         node_index_path=settings.get("node_index_path"),
         entity_index_path=settings.get("entity_index_path"),
+        backups_dir=settings.get("backups_dir"),
     )
     store.enable_timing(args.timing)
     _COMMAND_STORE = store

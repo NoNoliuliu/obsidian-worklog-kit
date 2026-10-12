@@ -26,6 +26,7 @@ class WorklogStore(MaterialsMixin, KnowledgeMixin, SearchMixin, ViewsMixin, Inte
         self, vault_root: str | Path, *, read_only: bool = False,
         node_index_path: str | Path | None = None,
         entity_index_path: str | Path | None = None,
+        backups_dir: str | Path | None = None,
     ):
         self.vault_root = Path(vault_root)
         self.root = self.vault_root / "周报系统"
@@ -33,7 +34,8 @@ class WorklogStore(MaterialsMixin, KnowledgeMixin, SearchMixin, ViewsMixin, Inte
         self.tasks_dir = self.root / "任务台账"
         self.nodes_dir = self.root / "工作节点"
         self.drafts_dir = self.root / "周报草稿"
-        self.backups_dir = self.root / "备份"
+        # Backups default to the vault; config.yaml backups_dir can keep them outside so Obsidian does not index them.
+        self.backups_dir = Path(backups_dir).expanduser() if backups_dir else self.root / "备份"
         self.canvas_dir = self.root / "项目关系图"
         self.views_dir = self.root / "视图"
         self.method_dir = self.vault_root / "方法论库"
@@ -274,6 +276,13 @@ class WorklogStore(MaterialsMixin, KnowledgeMixin, SearchMixin, ViewsMixin, Inte
                 "holidays: []\nworkdays: []\n",
             )
         self._write_base_views()
+
+    def _backup_ref(self, path: Path) -> str:
+        """Vault-relative backup path when inside the vault, absolute otherwise (backups_dir may be outside)."""
+        try:
+            return Path(path).relative_to(self.vault_root).as_posix()
+        except ValueError:
+            return str(path)
 
     @contextmanager
     def mutation_lock(self):

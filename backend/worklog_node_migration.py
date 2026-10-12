@@ -109,7 +109,7 @@ def _atomic_write_bytes(path: Path, data: bytes) -> None:
     os.replace(temporary, path)
 
 
-def apply_plan(vault: Path, plan: dict[str, Any], expected_plan_hash: str) -> dict[str, Any]:
+def apply_plan(vault: Path, plan: dict[str, Any], expected_plan_hash: str, backup_root: Path | None = None) -> dict[str, Any]:
     if plan_hash(plan) != expected_plan_hash or plan.get("plan_hash") != expected_plan_hash:
         raise SystemExit("计划哈希不一致：请重新生成并审阅计划")
     stale = []
@@ -119,7 +119,7 @@ def apply_plan(vault: Path, plan: dict[str, Any], expected_plan_hash: str) -> di
             stale.append(item["path"])
     if stale:
         raise SystemExit(f"{len(stale)} 个文件自计划生成后已变化，未写入任何文件；请重新生成计划。示例：{stale[:3]}")
-    backup = vault / BACKUP_DIR / f"node-field-migration-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6]}"
+    backup = (backup_root or vault / BACKUP_DIR) / f"node-field-migration-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6]}"
     for item in plan["changes"]:
         source = vault / item["path"]
         target = backup / item["path"]
@@ -196,10 +196,15 @@ def main(argv: list[str] | None = None) -> int:
         summary = {k: plan[k] for k in ("scanned_files", "changed_files", "removed_lines", "plan_hash")}
     else:
         # Hold the same vault lock as normal writes so no AI tool records nodes mid-migration.
+        from settings import load_settings
         from worklog_core import WorklogStore
-        with WorklogStore(vault).mutation_lock():
+        settings = load_settings()
+        same_vault = Path(settings["vault_root"]).resolve() == vault.resolve()
+        store = WorklogStore(vault, backups_dir=settings.get("backups_dir") if same_vault else None)
+        with store.mutation_lock():
             if args.command == "apply":
-                summary = apply_plan(vault, json.loads(Path(args.plan).read_text(encoding="utf-8")), args.expected_plan_hash)
+                summary = apply_plan(vault, json.loads(Path(args.plan).read_text(encoding="utf-8")), args.expected_plan_hash,
+                                     backup_root=store.backups_dir)
             else:
                 summary = rollback(vault, Path(args.backup))
     print(json.dumps({"ok": True, **summary}, ensure_ascii=False, indent=2))

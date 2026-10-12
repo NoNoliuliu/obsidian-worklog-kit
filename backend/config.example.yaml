@@ -12,3 +12,5 @@
 #   - 个人/
 # 可选：dashboard 导出目录（必须在 Vault 之外）。
 # dashboard_dir: /path/outside/vault/dashboard
+# 可选：写前备份目录（修订、排除、修复、迁移）。建议放在 Vault 外，避免 Obsidian 索引历史副本；默认 Vault/周报系统/备份。
+# backups_dir: /path/outside/vault/worklog-backups

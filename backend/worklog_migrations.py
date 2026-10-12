@@ -94,7 +94,7 @@ class MigrationsMixin:
         _atomic_write(self.schema_path, _safe_yaml({
             "version": 2,
             "migrated_at": _now().isoformat(),
-            "backup": backup_root.relative_to(self.vault_root).as_posix(),
+            "backup": self._backup_ref(backup_root),
         }) + "\n")
         for project in self.list_projects():
             self.sync_overview(project["project_id"])
@@ -179,7 +179,7 @@ class MigrationsMixin:
         _atomic_write(self.schema_path, _safe_yaml({
             "version": 3,
             "migrated_at": _now().isoformat(),
-            "backup": backup_root.relative_to(self.vault_root).as_posix(),
+            "backup": self._backup_ref(backup_root),
             "model": "personal-work-panorama",
         }) + "\n")
         for project in self.list_projects():
@@ -223,7 +223,7 @@ class MigrationsMixin:
         _atomic_write(self.schema_path, _safe_yaml({
             "version": 4,
             "migrated_at": _now().isoformat(),
-            "backup": backup_root.relative_to(self.vault_root).as_posix(),
+            "backup": self._backup_ref(backup_root),
             "model": "personal-work-panorama",
             "view_properties": ["summary", "next_action", "related_path"],
         }) + "\n")
@@ -245,7 +245,7 @@ class MigrationsMixin:
         _atomic_write(self.schema_path, _safe_yaml({
             "version": 5,
             "migrated_at": _now().isoformat(),
-            "backup": backup_root.relative_to(self.vault_root).as_posix(),
+            "backup": self._backup_ref(backup_root),
             "model": "personal-work-panorama-with-project-learning",
             "experience": ["流程", "问题与决策", "产出", "复盘", "方法论候选", "方法论库"],
         }) + "\n")
@@ -336,7 +336,7 @@ class MigrationsMixin:
         _atomic_write(self.schema_path, _safe_yaml({
             "version": 6,
             "migrated_at": _now().isoformat(),
-            "backup": backup_root.relative_to(self.vault_root).as_posix(),
+            "backup": self._backup_ref(backup_root),
             "model": "personal-work-panorama-readable-storage",
             "internal_ids": "frontmatter only",
             "human_readable_storage": ["项目台账", "任务台账", "工作节点", "项目关系图"],

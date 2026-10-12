@@ -28,6 +28,8 @@ def load_settings() -> dict[str, Any]:
     defaults.update(raw)
     defaults["search_exclude"] = [str(item) for item in (defaults.get("search_exclude") or []) if str(item or "").strip()]
     defaults["personal_prefixes"] = [str(item) for item in (defaults.get("personal_prefixes") or []) if str(item or "").strip()]
+    if defaults.get("backups_dir"):
+        defaults["backups_dir"] = str(Path(defaults["backups_dir"]).expanduser())
     for key in ("vault_root", "weekly_source_dir", "export_dir", "template_path", "node_index_path", "entity_index_path", "dashboard_dir"):
         defaults[key] = str(Path(defaults[key]))
     return defaults

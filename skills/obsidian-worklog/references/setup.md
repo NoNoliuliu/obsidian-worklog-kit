@@ -14,7 +14,7 @@
 4. 用测试 Vault 测试一次录入（可先 `record-intent-json --dry-run`）、预检拦截与 `acknowledged_flags` 重提、修订和 `undo`，再检查原记录、修订链与派生视图。
 5. 周报先 `preview --start YYYY-MM-DD --end YYYY-MM-DD --draft-review`，核实来源、按 `draft_notes` 改写至 `export_ready: true` 后再导出到测试目录。
 
-可选配置（`config.yaml`）：`search_exclude`（search 默认跳过的 Vault 目录，默认 `个人/`、`AI Skill仓库/`）、`personal_prefixes`（`search --scope personal` 的目录）、`dashboard_dir`（看板导出目录，须在 Vault 外）、`weekly_excluded_project_ids`。
+可选配置（`config.yaml`）：`search_exclude`（search 默认跳过的 Vault 目录，默认 `个人/`、`AI Skill仓库/`）、`personal_prefixes`（`search --scope personal` 的目录）、`dashboard_dir`（看板导出目录，须在 Vault 外）、`backups_dir`（写前备份目录，建议放在 Vault 外，避免 Obsidian 把历史副本当作笔记索引）、`weekly_excluded_project_ids`。
 
 对只读查询，检查 `meta.returned` 与实际项目数；`meta.truncated: true` 表示只返回一部分，不能据此断言项目不存在。审计有警告时阅读具体警告，不把退出码 0 当作全部通过。
 

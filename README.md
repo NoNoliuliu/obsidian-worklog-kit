@@ -167,6 +167,7 @@ cp backend/config.example.yaml backend/config.yaml
 | `search_exclude` | `search` 默认跳过的 Vault 目录 | `个人/`、`AI Skill仓库/` |
 | `personal_prefixes` | `search --scope personal` 查询的目录 | `个人/` |
 | `dashboard_dir` | 看板导出目录（必须在 Vault 之外） | `backend/runtime/dashboard` |
+| `backups_dir` | 写前备份目录（修订、排除、修复、迁移）；建议放在 Vault 之外，避免 Obsidian 把历史副本当作笔记索引 | `Vault/周报系统/备份` |
 
 真实 `config.yaml`、Vault、导入和导出文件均被 `.gitignore` 排除，不要提交到版本库。首次使用空 Vault 时先创建最小目录：
 
@@ -220,7 +221,7 @@ python3 skills/obsidian-worklog/scripts/record_worklog.py brief --pretty
 - **全部本地**：数据是你 Vault 中的 Markdown 文件，后端不联网、不上传。
 - **写前检查**：可疑写入先返回需确认；写操作持有跨进程锁，避免多个 AI 工具同时写入时丢失更新。
 - **不删除历史**：更正保留修订链，误记录只标记排除；收件箱分流、目录清理都只移动或标记，不删除文件。
-- **先备份再修改**：修复、归并、目录维护、节点迁移都先备份到 `周报系统/备份/`，可按清单回滚。
+- **先备份再修改**：修复、归并、目录维护、节点迁移都先备份（默认 `周报系统/备份/`，可用 `backups_dir` 移到 Vault 之外），可按清单回滚。
 - **周报可追溯**：每份 Excel 附带 `.verification.json`，记录来源指纹与逐项整理依据。
 - **结构检查不等于事实正确**：`ok: true` 和审计通过只代表结构一致，自然语言内容仍需人工核对。
 
@@ -228,6 +229,7 @@ python3 skills/obsidian-worklog/scripts/record_worklog.py brief --pretty
 
 | 版本 | 主要变化 |
 |---|---|
+| 1.36.2 | 备份目录可配置到 Vault 之外（`backups_dir`），避免大量历史副本拖慢 Obsidian 启动 |
 | 1.36 | 收件箱与个人笔记、周报整理稿草稿（`--draft-review`、`export_ready`）、看板导出、阶段复盘草稿；`undo --last` 并列保护 |
 | 1.35 | 后端按职责拆分为多个模块；节点不再冗余保存项目级字段，并提供可回滚的迁移工具 |
 | 1.34 | 写前预检与确认、`--dry-run`、`undo`、输入 Schema |
