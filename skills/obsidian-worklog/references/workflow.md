@@ -2,7 +2,7 @@
 
 ## 1. 查询项目背景
 
-先运行 `brief` 获取近期项目、其他进行中项目、等待/阻塞任务和收件箱数量；需要完整清单时用 `projects --compact --sort-by last_activity`。再按项目名运行 `context --project "项目名"`（默认精简并有字符上限，`--full` 返回总览正文、问题和方法列表），按需补查 `tasks`、`search`、`graph`。重名时先区分；状态、当前进展和下一步以最新正式字段为准，缺失事实标记待确认。
+先运行 `brief` 获取近期项目、其他进行中项目、等待/阻塞任务和收件箱数量；需要完整清单时用 `projects --compact --sort-by last_activity`。再按项目名运行 `context --project "项目名"`（默认精简并有字符上限，`--full` 返回总览正文、问题和方法列表），按需补查 `tasks`、`search`、`graph`。重名时先区分；状态、当前进展和下一步以最新正式字段为准，缺失事实标记待确认。项目的 `latest_summary` 只是全部有效节点中发生时间最新一条的摘要，多任务并行时不代表当天全部变动：同一项目在时间窗内有多个任务更新时，`brief` 和 `projects --compact` 会附带 `recent_task_updates`（最多 3 条，`more_task_updates` 为其余数量），需逐条说明；问“最近有什么变动”时用只读的 `changes --since 7` 按任务列出变动。
 
 ## 2. 归档与修订
 

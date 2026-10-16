@@ -41,7 +41,7 @@ CONTEXT_NODE_FIELDS = (
 )
 
 READ_ONLY_COMMANDS = {
-    "projects", "brief", "context", "tasks", "search", "list-candidates", "method", "graph", "preview", "audit-integrity",
+    "projects", "brief", "changes", "context", "tasks", "search", "list-candidates", "method", "graph", "preview", "audit-integrity",
     "audit-project-materials", "audit-structure", "node", "move-project", "rename-project", "recover-project-maintenance",
     "schema", "inbox", "dashboard", "retro",
 }
@@ -140,11 +140,84 @@ def _clip(value: Any, limit: int) -> Any:
     return text[:limit].rstrip() + "…"
 
 
+TASK_UPDATES_PER_PROJECT = 3
+TASK_UPDATE_DEFAULT_DAYS = 7
+
+
+def recent_task_updates(
+    tasks: list[dict[str, Any]], nodes: list[dict[str, Any]], *, since: date | None,
+    summary_chars: int = 120,
+) -> dict[str, list[dict[str, Any]]]:
+    """Latest effective node per task inside the window, grouped by project, newest first.
+
+    A project's ``latest_summary`` reflects only its single newest node; with several
+    tasks moving in parallel the other updates would otherwise be invisible in compact views.
+    """
+    node_by_id = {node.get("node_id"): node for node in nodes}
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for task in tasks:
+        node = node_by_id.get(task.get("latest_node_id"))
+        if not node:
+            continue
+        occurred = str(node.get("occurred_at") or "")
+        if since is not None and occurred[:10] < since.isoformat():
+            continue
+        grouped.setdefault(str(task.get("project_id") or ""), []).append({
+            "task": task.get("title"),
+            "status": task.get("status"),
+            "occurred_at": occurred,
+            "summary": _clip(node.get("summary"), summary_chars) if summary_chars > 0 else node.get("summary"),
+            "next_action": _clip(node.get("next_action"), summary_chars) if summary_chars > 0 else node.get("next_action"),
+        })
+    for updates in grouped.values():
+        updates.sort(key=lambda item: item["occurred_at"], reverse=True)
+    return grouped
+
+
+def list_changes(
+    projects: list[dict[str, Any]], tasks: list[dict[str, Any]], nodes: list[dict[str, Any]], *,
+    since: date, summary_chars: int = 80, include_hidden: bool = False,
+) -> list[dict[str, Any]]:
+    """Read-only: one row per task with effective nodes inside the window, newest first."""
+    visible = {item.get("project_id"): item for item in projects
+               if include_hidden or item.get("display_in_views", True)}
+    task_by_id = {task.get("task_id"): task for task in tasks}
+    rows: dict[str, dict[str, Any]] = {}
+    for node in nodes:
+        occurred = str(node.get("occurred_at") or "")
+        if occurred[:10] < since.isoformat() or node.get("project_id") not in visible:
+            continue
+        key = str(node.get("task_id") or f"project:{node.get('project_id')}")
+        row = rows.get(key)
+        if row is None:
+            task = task_by_id.get(node.get("task_id"), {})
+            row = rows[key] = {
+                "project": visible[node.get("project_id")].get("name"), "task_id": node.get("task_id") or "",
+                "title": task.get("title") or ("（项目级记录）" if not node.get("task_id") else ""),
+                "status": task.get("status") or "",
+                "occurred_at": "", "kind": "", "summary": "", "nodes_in_window": 0,
+            }
+        row["nodes_in_window"] += 1
+        if occurred > row["occurred_at"]:
+            row.update(occurred_at=occurred, kind=node.get("kind") or "",
+                       summary=_clip(node.get("summary"), summary_chars) if summary_chars > 0 else node.get("summary"))
+    return sorted(rows.values(), key=lambda item: item["occurred_at"], reverse=True)
+
+
+def _attach_task_updates(item: dict[str, Any], updates: list[dict[str, Any]]) -> None:
+    # One updated task is already what latest_summary shows; only parallel movement adds information.
+    if len(updates) >= 2:
+        item["recent_task_updates"] = updates[:TASK_UPDATES_PER_PROJECT]
+        if len(updates) > TASK_UPDATES_PER_PROJECT:
+            item["more_task_updates"] = len(updates) - TASK_UPDATES_PER_PROJECT
+
+
 def select_projects(
     projects: list[dict[str, Any]], *, statuses: list[str] | None = None,
     since_days: int | None = None, visible_only: bool = False,
     sort_by: str = "", limit: int | None = None, compact: bool = False,
     today: date | None = None, summary_chars: int = 0,
+    task_updates: dict[str, list[dict[str, Any]]] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Filter project output while retaining counts that expose intentional truncation."""
     statuses = statuses or []
@@ -170,11 +243,15 @@ def select_projects(
     if limit is not None:
         selected = selected[:limit]
     if compact:
+        ids = [item.get("project_id") for item in selected]
         selected = [{key: item.get(key) for key in PROJECT_COMPACT_FIELDS} for item in selected]
         if summary_chars > 0:
             for item in selected:
                 item["latest_summary"] = _clip(item.get("latest_summary"), summary_chars)
                 item["next_action"] = _clip(item.get("next_action"), summary_chars)
+        if task_updates:
+            for project_id, item in zip(ids, selected):
+                _attach_task_updates(item, task_updates.get(str(project_id or ""), []))
 
     meta = {
         "total": len(projects),
@@ -280,12 +357,17 @@ def fit_compact_context(context: dict[str, Any], max_chars: int) -> dict[str, An
 def build_brief(
     projects: list[dict[str, Any]], tasks: list[dict[str, Any]], *, since_days: int = 7,
     today: date | None = None, summary_chars: int = 80, review_count: int = 0, inbox_pending: int = 0,
+    nodes: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Smallest useful overview: recently active visible projects plus waiting or blocked tasks."""
     visible = [item for item in projects if item.get("display_in_views", True)]
+    updates = recent_task_updates(
+        tasks, nodes or [], since=(today or date.today()) - timedelta(days=since_days),
+        summary_chars=summary_chars,
+    ) if nodes else None
     recent, recent_meta = select_projects(
         visible, since_days=since_days, sort_by="last_activity", compact=True,
-        today=today, summary_chars=summary_chars,
+        today=today, summary_chars=summary_chars, task_updates=updates,
     )
     active = [item for item in visible if item.get("project_status") in {"进行中", "待确认"}]
     recent_names = {item["name"] for item in recent}
@@ -303,7 +385,8 @@ def build_brief(
     return {
         "since_days": since_days,
         "recent_projects": [
-            {key: item.get(key) for key in ("name", "project_status", "last_activity_at", "latest_summary", "next_action", "open_task_count")}
+            {key: item[key] for key in ("name", "project_status", "last_activity_at", "latest_summary", "next_action",
+                                        "open_task_count", "recent_task_updates", "more_task_updates") if key in item}
             for item in recent
         ],
         "other_active_projects": [
@@ -337,6 +420,11 @@ def build_parser() -> argparse.ArgumentParser:
     projects.add_argument("--limit", type=_positive_int, help="限制返回数量；meta.truncated 会标明是否省略")
     projects.add_argument("--compact", action="store_true", help="只返回日常查阅字段并压缩 JSON")
     projects.add_argument("--pretty", action="store_true", help="多行格式化 JSON；可与 --compact 同时使用")
+    changes = sub.add_parser("changes", help="只读：按任务列出近期有变化的条目，适合回答“本周有什么变动”")
+    changes.add_argument("--since-days", "--since", dest="since_days", type=_positive_int, default=7)
+    changes.add_argument("--summary-chars", type=int, default=80)
+    changes.add_argument("--include-hidden", action="store_true", help="包含不在视图中显示的项目")
+    changes.add_argument("--pretty", action="store_true", help="多行格式化 JSON")
     brief = sub.add_parser("brief", help="最小工作概览：近期项目、其他进行中项目、等待/阻塞任务")
     brief.add_argument("--since-days", type=_positive_int, default=7)
     brief.add_argument("--summary-chars", type=int, default=80)
@@ -596,18 +684,32 @@ def main(argv: list[str] | None = None) -> int:
         with store.timed_stage("migration_check"):
             migration = {"migrated": False, "reason": "read-only"} if read_only else store.migrate_schema_v6()
         if args.command == "projects":
+            updates = None
+            if args.compact:
+                window = args.since_days if args.since_days is not None else TASK_UPDATE_DEFAULT_DAYS
+                updates = recent_task_updates(
+                    store.list_tasks(), store.list_nodes(), since=date.today() - timedelta(days=window),
+                    summary_chars=min(args.summary_chars or 120, 120),
+                )
             projects, meta = select_projects(
                 store.list_projects(), statuses=args.status, since_days=args.since_days,
                 visible_only=not args.include_hidden, sort_by=args.sort_by, limit=args.limit,
-                compact=args.compact, summary_chars=args.summary_chars,
+                compact=args.compact, summary_chars=args.summary_chars, task_updates=updates,
             )
             return emit({"ok": True, "meta": meta, "projects": projects}, compact=compact_json_output(args))
+        if args.command == "changes":
+            since = date.today() - timedelta(days=args.since_days)
+            rows = list_changes(store.list_projects(), store.list_tasks(), store.list_nodes(), since=since,
+                                summary_chars=args.summary_chars, include_hidden=args.include_hidden)
+            return emit({"ok": True, "since": since.isoformat(), "count": len(rows), "changes": rows},
+                        compact=not args.pretty)
         if args.command == "brief":
-            review_count = sum(1 for node in store.list_nodes() if node.get("review_state") == "待确认")
+            all_nodes = store.list_nodes()
+            review_count = sum(1 for node in all_nodes if node.get("review_state") == "待确认")
             brief_result = build_brief(
                 store.list_projects(), store.list_tasks(), since_days=args.since_days,
                 summary_chars=args.summary_chars, review_count=review_count,
-                inbox_pending=inbox_counts(store).get(PENDING, 0),
+                inbox_pending=inbox_counts(store).get(PENDING, 0), nodes=all_nodes,
             )
             return emit({"ok": True, "brief": brief_result}, compact=not args.pretty)
         if args.command == "context":
