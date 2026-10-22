@@ -152,6 +152,18 @@ def unacknowledged(findings: list[dict[str, Any]], payload: dict[str, Any]) -> l
     return [item for item in findings if item["code"] not in acknowledged]
 
 
+def intent_warnings(project: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Report visibility without adding a confirmation gate or changing ownership."""
+    if not project or project.get("display_in_views", True):
+        return []
+    return [{
+        "code": "hidden_project_target",
+        "project": project["name"],
+        "message": "目标归属已隐藏，本次记录不会出现在默认 brief、projects、changes 查询中。"
+                   "新独立事项宜建立可见条目；历史续记或明确指定的隐藏归属可继续使用。",
+    }]
+
+
 def plan_intent(store: Any, payload: dict[str, Any]) -> dict[str, Any]:
     """Resolve what record-intent-json would write, without writing. Mirrors WorklogStore._record_intent."""
     intent_type = str(payload.get("intent_type") or "").strip()
@@ -171,7 +183,8 @@ def plan_intent(store: Any, payload: dict[str, Any]) -> dict[str, Any]:
         existing = next((node for node in store.list_nodes(effective_only=False)
                          if node.get("idempotency_key") == idempotency_key), None)
         if existing:
-            return {"action": "idempotent_replay", "project": project["name"], "node_id": existing.get("node_id")}
+            return {"action": "idempotent_replay", "project": project["name"],
+                    "display_in_views": project.get("display_in_views", True), "node_id": existing.get("node_id")}
 
     task_ref = str(payload.get("task_id") or payload.get("task_title") or "").strip()
     task = store.get_task(task_ref, project["project_id"]) if task_ref else None
@@ -195,6 +208,7 @@ def plan_intent(store: Any, payload: dict[str, Any]) -> dict[str, Any]:
         "action": "record",
         "project": project["name"],
         "project_id": project["project_id"],
+        "display_in_views": project.get("display_in_views", True),
         "task": task_plan,
         "node": {
             "intent_type": intent_type, "kind": kind, "source": source,

@@ -152,8 +152,17 @@ def _atomic_write(path: Path, content: str) -> None:
             intent_store._write_existing_node_without_replace(path, content)
             return
         temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-        temporary.write_text(content, encoding="utf-8", newline="\n")
-        os.replace(temporary, path)
+        try:
+            temporary.write_text(content, encoding="utf-8", newline="\n")
+            os.replace(temporary, path)
+        except Exception as error:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError as cleanup_error:
+                raise WorklogError(
+                    f"写入失败：{error}；临时文件清理失败：{cleanup_error}；残留文件：{temporary}"
+                ) from error
+            raise
 
 
 def _write_if_changed(path: Path, content: str) -> bool:

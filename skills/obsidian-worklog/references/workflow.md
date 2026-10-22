@@ -8,6 +8,8 @@
 
 判断内容属于业务项目、单次事项、工作机制还是个人内容。核对已有项目与任务，提炼“做了什么、结果、下一步、发生日期”，再调用兼容后端的录入命令，例如 `record-intent-json`。`source` 填执行记录的 AI 工具：WorkBuddy、Claude Code、Codex、Doubao Work、Qwen Office 或 QoderWork；“豆包”“千问办公”等简称会自动归一，其他名称会被拒绝。写前预检命中时返回 `needs_confirmation` 且不写入：说明 `findings`，经用户确认后加 `acknowledged_flags` 重提。范围不确定时先 `--dry-run`。更正历史使用 `revise-node-json` 和当前哈希，保留原文；刚写错的记录用 `undo --node-id … --reason …`（或 `--last`，同一时间多条时须改用 `--node-id`）。写后复查受影响任务、项目总览及视图；出现警告时先查原因，不盲目重试。
 
+新独立事项如无具体项目归属，先建立自己的可见条目（单次事项使用 `work_type=单次事项`、`project_mode=bounded`），不以分类同名或相近为由挂入隐藏总账；已有具体项目则续接该项目。隐藏总账可承接历史续记或用户明确指定的归属，不批量搬移历史。预检计划的 `display_in_views` 表示目标可见性；`hidden_project_target` 警告提示其记录不会出现在默认 `brief`、`projects`、`changes` 查询中。这是非阻断提示，不加入 `acknowledged_flags`，不需要重复确认；新独立事项应在写前选对可见归属。
+
 ## 收件箱与个人笔记
 
 尚未确认或归属不清的内容用 `capture --text "…"` 写入 `00-收件箱/`，不进入项目、全景和周报；`inbox` 列出待处理条目。用户确认后 `triage --inbox-id … --to node|candidate|personal|discard`：node 从标准输入提供 record-intent JSON（同样预检），candidate 提供 propose-method JSON，discard 须 `--reason`。`capture --personal` 直接写入 `个人/随手记/`，只在 `search --scope personal` 中出现。

@@ -10,7 +10,7 @@ from typing import Any
 
 from settings import load_settings
 from worklog_core import WorklogError, WorklogStore
-from worklog_guard import SCHEMAS, classify_intent, plan_intent, unacknowledged
+from worklog_guard import SCHEMAS, classify_intent, intent_warnings, plan_intent, unacknowledged
 from worklog_inbox import PENDING, TRIAGE_STATUS, capture, inbox_counts, list_inbox, triage
 from worklog_structure import WORK_DOMAINS
 
@@ -65,7 +65,7 @@ _COMMAND_STORE: WorklogStore | None = None
 
 def emit(payload, code: int = 0, *, compact: bool = False) -> int:
     if _COMMAND_STORE is not None and not _COMMAND_STORE.read_only and isinstance(payload, dict):
-        warnings = _COMMAND_STORE.write_warnings()
+        warnings = [*payload.get("warnings", []), *_COMMAND_STORE.write_warnings()]
         if warnings:
             payload = {**payload, "warnings": warnings}
             for warning in warnings:
@@ -843,23 +843,28 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "record-intent-json":
             payload = json.load(sys.stdin)
             project_ref = str(payload.get("project_id") or payload.get("project") or "").strip()
+            project = store.get_project(project_ref) if project_ref else None
+            visibility_warnings = intent_warnings(project)
             findings = classify_intent(
-                payload, project=store.get_project(project_ref) if project_ref else None,
+                payload, project=project,
                 nodes=store.list_nodes(effective_only=False), projects=store.list_projects(),
             )
             blocking = unacknowledged(findings, payload)
             if args.dry_run:
                 return emit({"ok": True, "dry_run": True, "plan": plan_intent(store, payload),
-                             "findings": findings, "needs_confirmation": bool(blocking)})
+                             "findings": findings, "needs_confirmation": bool(blocking),
+                             **({"warnings": visibility_warnings} if visibility_warnings else {})})
             if blocking:
                 return emit({
                     "ok": False, "needs_confirmation": True, "findings": blocking,
+                    **({"warnings": visibility_warnings} if visibility_warnings else {}),
                     "error": "预检未通过，未写入。向用户说明后，如确认仍要记录，在原 JSON 中加入 "
                              "acknowledged_flags（列出确认放行的 code）重新提交。",
                 }, NEEDS_CONFIRMATION_EXIT)
             with store.timed_stage("command_record_intent"):
                 result = store.record_intent(payload)
             return emit({"ok": True, "result": result,
+                         **({"warnings": visibility_warnings} if visibility_warnings else {}),
                          **({"acknowledged_findings": findings} if findings else {})})
         if args.command == "undo":
             if args.node_id:
