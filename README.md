@@ -213,6 +213,7 @@ python3 skills/obsidian-worklog/scripts/record_worklog.py brief --pretty
 | 看板 | `dashboard` |
 | 维护 | `audit-integrity`、`audit-structure`、`repair-integrity`、`merge-projects`、`merge-tasks`、`move-task`、`move-project`、`rename-project`、`apply-project-maintenance`、`recover-project-maintenance`、`close-project` |
 | 资料索引 | `setup-project-experience`、`index-project-materials`、`audit-project-materials` |
+| 资料索引排除 | 点开头的隐藏目录始终不索引；`index-project-materials --exclude "outputs" --exclude "tmp_*"` 排除中间产物等过程目录（保存为项目规则，`--clear-excludes` 清空） |
 
 所有命令输出 JSON；查询命令不修改业务文件，加 `--timing` 可查看耗时。完整参数以 `--help` 为准。
 

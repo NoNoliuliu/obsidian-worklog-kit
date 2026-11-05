@@ -474,6 +474,9 @@ def build_parser() -> argparse.ArgumentParser:
     index_materials = sub.add_parser("index-project-materials", help="生成项目资料、课件与视频的可搜索索引")
     index_materials.add_argument("--project", required=True)
     index_materials.add_argument("--source-root", required=True)
+    index_materials.add_argument("--exclude", action="append", default=None,
+                                 help="不索引的子目录（相对来源目录的通配符，可重复，如 outputs、obs拉取_*）；传入即整体替换并保存到项目经验索引，省略则沿用已保存规则")
+    index_materials.add_argument("--clear-excludes", action="store_true", help="清空已保存的项目排除规则（隐藏目录始终跳过）")
     audit_materials = sub.add_parser("audit-project-materials", help="核查资料索引的漏录、重复和识别错误")
     audit_materials.add_argument("--project", required=True)
     audit_materials.add_argument("--source-root", required=True)
@@ -790,7 +793,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "setup-project-experience":
             return emit({"ok": True, "experience": store.initialize_project_experience(args.project, args.source_root)})
         if args.command == "index-project-materials":
-            return emit({"ok": True, "index": store.build_material_index(args.project, args.source_root)})
+            excludes = [] if args.clear_excludes else args.exclude
+            return emit({"ok": True, "index": store.build_material_index(args.project, args.source_root, excludes)})
         if args.command == "audit-project-materials":
             audit = store.audit_material_index(args.project, args.source_root, write_report=args.write_report)
             return emit({"ok": audit["ok"], "audit": audit}, 0 if audit["ok"] else 2)

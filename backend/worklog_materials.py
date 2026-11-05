@@ -1,10 +1,15 @@
 """Project folders, experience scaffolding and material indexes."""
 from __future__ import annotations
 
+import fnmatch
+
 from worklog_base import (  # noqa: F401
     Any, Iterable, MATERIAL_END, MATERIAL_START, Path, UnknownProjectError, WorklogError, _atomic_write,
-    _clean_cell, _file_hash, _now, _safe_yaml, date, defaultdict, re
+    _clean_cell, _file_hash, _now, _parse_frontmatter_text, _safe_yaml, date, defaultdict, re
 )
+
+HIDDEN_DIRECTORY_RULE = "隐藏目录（.开头）"
+COURSE_PACKAGE_SUFFIXES = {".zip", ".rar", ".7z", ".html", ".htm", ".md"}
 
 
 class MaterialsMixin:
@@ -132,6 +137,8 @@ class MaterialsMixin:
 
         if "会议纪要" in name_text:
             return "沟通与会议纪要", f"沟通与会议纪要 / {period}", False
+        if "纪要" in name_text or "讨论" in name_text:
+            return "沟通与会议纪要", f"沟通与会议纪要 / {period}", False
 
         if "月报" in name_text:
             if "数据包" in name_text or "运营数据" in name_text:
@@ -176,6 +183,8 @@ class MaterialsMixin:
 
         if suffix == ".html" and "报告" in name_text:
             return "培训总结报告与宣传", f"培训总结报告与宣传 / {period}", False
+        if suffix in COURSE_PACKAGE_SUFFIXES:
+            return "课程资料与视频", f"课程资料与视频 / {period}", False
 
         return "培训通知与海报", f"待确认项目资料 / {period}", True
 
@@ -217,18 +226,64 @@ class MaterialsMixin:
     def _material_destination(self, group: str, item: Path, relative: Path) -> str:
         return self._classify_material(item, relative)[0]
 
-    def _material_inventory(self, source: Path, *, project_name: str = "") -> tuple[
-        list[tuple[Path, Path, int]], list[str], dict[str, str]
+    @staticmethod
+    def _normalize_material_excludes(patterns: Iterable[str] | None) -> list[str]:
+        cleaned: list[str] = []
+        for raw in patterns or ():
+            value = str(raw or "").replace("\\", "/").strip().strip("/")
+            if value and value not in cleaned:
+                cleaned.append(value)
+        return cleaned
+
+    @staticmethod
+    def _material_exclusion(relative: Path, patterns: Iterable[str]) -> str:
+        """Return the rule that excludes a file's parent directory, or ''.
+
+        Hidden directories (name starting with '.') are always skipped; project
+        patterns are shell-style globs matched against every parent directory
+        prefix of the source-relative path, e.g. ``outputs`` or ``obs拉取_*``.
+        """
+        directories = relative.parts[:-1]
+        if any(part.startswith(".") for part in directories):
+            return HIDDEN_DIRECTORY_RULE
+        for depth in range(1, len(directories) + 1):
+            prefix = "/".join(directories[:depth])
+            for pattern in patterns:
+                if fnmatch.fnmatchcase(prefix, pattern):
+                    return pattern
+        return ""
+
+    def _material_excludes(self, project: dict[str, Any], override: Iterable[str] | None = None) -> list[str]:
+        """Read, or replace and persist, the project's material exclusion patterns."""
+        index = self._experience_index_path(project)
+        text = index.read_text(encoding="utf-8") if index.exists() else ""
+        meta, body = _parse_frontmatter_text(text)
+        if override is None:
+            return self._normalize_material_excludes(meta.get("material_excludes") or [])
+        patterns = self._normalize_material_excludes(override)
+        if index.exists() and meta.get("material_excludes", []) != patterns:
+            meta["material_excludes"] = patterns
+            _atomic_write(index, "---\n" + _safe_yaml(meta) + "\n---\n\n" + body.lstrip("\n"))
+        return patterns
+
+    def _material_inventory(self, source: Path, *, project_name: str = "", excludes: Iterable[str] = ()) -> tuple[
+        list[tuple[Path, Path, int]], list[str], dict[str, str], dict[str, int]
     ]:
         """Collect indexable files and collapse byte-identical repeated copies."""
         candidates: list[tuple[Path, Path, int]] = []
         ignored: list[str] = []
+        excluded: dict[str, int] = {}
+        patterns = list(excludes)
         for item in sorted(source.rglob("*"), key=lambda path: str(path).lower()):
             if not item.is_file():
                 continue
             relative = item.relative_to(source)
             if (project_name == "AI生产力培训周第二阶段"
                     and relative.parts[0] == "AI 生产力提速培训周第三期"):
+                continue
+            rule = self._material_exclusion(relative, patterns)
+            if rule:
+                excluded[rule] = excluded.get(rule, 0) + 1
                 continue
             if self._ignore_material(item):
                 ignored.append(relative.as_posix())
@@ -256,7 +311,7 @@ class MaterialsMixin:
                 for duplicate in identical[1:]:
                     duplicate_of[duplicate[1].as_posix()] = kept
         retained.sort(key=lambda entry: str(entry[1]).lower())
-        return retained, sorted(ignored), dict(sorted(duplicate_of.items()))
+        return retained, sorted(ignored), dict(sorted(duplicate_of.items())), dict(sorted(excluded.items()))
 
     def _material_page_paths(self, project: dict[str, Any]) -> dict[str, Path]:
         folder = self._project_folder(project)
@@ -293,7 +348,7 @@ class MaterialsMixin:
                     groups[row.group(1)] = heading
         return groups
 
-    def build_material_index(self, project: str, source_root: str) -> dict[str, Any]:
+    def build_material_index(self, project: str, source_root: str, excludes: Iterable[str] | None = None) -> dict[str, Any]:
         """Write source-file metadata into the matching project output pages."""
         project_meta = self.get_project(project)
         if not project_meta:
@@ -302,7 +357,9 @@ class MaterialsMixin:
         if not source.exists() or not source.is_dir():
             raise WorklogError(f"原始资料目录不存在：{source_root}")
         self.initialize_project_experience(project_meta["project_id"], str(source))
-        inventory, ignored, source_duplicates = self._material_inventory(source, project_name=project_meta["name"])
+        patterns = self._material_excludes(project_meta, excludes)
+        inventory, ignored, source_duplicates, excluded = self._material_inventory(
+            source, project_name=project_meta["name"], excludes=patterns)
         existing_groups = self._existing_material_groups(project_meta)
         groups: dict[str, list[tuple[Path, Path, int]]] = {}
         total_size = 0
@@ -325,7 +382,8 @@ class MaterialsMixin:
                 if group.startswith("待确认项目资料"):
                     group = self._material_group(relative, item)
                 by_group.setdefault(group, []).append((item, relative, size))
-            lines = [MATERIAL_START, "## 已索引原始资料", "", f"- 来源目录：`{source}`", f"- 本页索引：{len(items)} 个文件。", "- 文件保留在来源目录；这里可直接按文件名、类型和路径搜索。", ""]
+            rules = "、".join([HIDDEN_DIRECTORY_RULE, *(f"`{pattern}`" for pattern in patterns)])
+            lines = [MATERIAL_START, "## 已索引原始资料", "", f"- 来源目录：`{source}`", f"- 本页索引：{len(items)} 个文件。", f"- 不索引的过程目录：{rules}。", "- 文件保留在来源目录；这里可直接按文件名、类型和路径搜索。", ""]
             for group, grouped_items in sorted(by_group.items()):
                 lines.extend([f"### {group}", "", "| 文件 | 类型 | 大小 | 原始路径 |", "|---|---|---:|---|"])
                 for item, relative, size in sorted(grouped_items, key=lambda value: str(value[1]).lower()):
@@ -350,6 +408,7 @@ class MaterialsMixin:
             "pages": {key: str(value) for key, value in page_paths.items()},
             "file_count": sum(len(items) for items in groups.values()), "group_count": len(groups),
             "ignored": ignored, "source_duplicates": source_duplicates,
+            "material_excludes": patterns, "excluded": excluded,
             "total_size": total_size, "audit": audit,
         }
 
@@ -364,7 +423,9 @@ class MaterialsMixin:
         expected: dict[str, set[str]] = {key: set() for key in self._material_page_paths(project_meta)}
         unknown_types: list[str] = []
         suspicious: list[str] = []
-        inventory, ignored, source_duplicates = self._material_inventory(source, project_name=project_meta["name"])
+        patterns = self._material_excludes(project_meta)
+        inventory, ignored, source_duplicates, excluded = self._material_inventory(
+            source, project_name=project_meta["name"], excludes=patterns)
         for item, relative, _size in inventory:
             group = self._material_group(relative, item)
             target = self._material_destination(group, item, relative)
@@ -402,6 +463,7 @@ class MaterialsMixin:
             "expected_file_count": sum(len(items) for items in expected.values()),
             "missing": missing, "extra": extra, "duplicates": duplicate_locations,
             "ignored": ignored, "source_duplicates": source_duplicates,
+            "material_excludes": patterns, "excluded": excluded,
             "unknown_types": sorted(unknown_types), "suspicious": sorted(suspicious),
         }
         if write_report:
@@ -424,6 +486,8 @@ class MaterialsMixin:
                 *( [f"- {page}：`{path}`" for page, paths in extra.items() for path in paths] + [f"- `{path}` 出现在：{'、'.join(locations)}" for path, locations in duplicate_locations.items()] or ["- 无"] ), "",
                 "## 未识别文件类型", "", *render_items(sorted(unknown_types)), "",
                 "## 已忽略系统文件", "", *render_items(ignored), "",
+                "## 已排除过程目录", "",
+                *render_items([f"{rule}：{count} 个文件" for rule, count in excluded.items()]), "",
                 "## 已合并的重复源文件", "",
                 *render_items([f"{path} -> {kept}" for path, kept in source_duplicates.items()]), "",
                 "## 疑似分类错误", "", *render_items(sorted(suspicious)), "",
